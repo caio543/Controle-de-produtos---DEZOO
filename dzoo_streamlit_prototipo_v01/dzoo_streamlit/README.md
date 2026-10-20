@@ -37,3 +37,12 @@ Na área **Pregões e itens de interesse do DEZOO**, use a aba **Importar e sele
 - As movimentações cadastradas no app **não são consulta oficial ao SIPAC**; o saldo de ata é apenas cálculo interno.
 - Não existe integração real com SIPAC, Compras.gov, PNCP nem envio de e-mail.
 - O botão de carga fictícia só funciona se o banco estiver vazio.
+
+## Melhorias v0.3
+
+- Na importação: botões **Selecionar todos** e **Desmarcar todos**.
+- Seleção separada em uma tabela compacta com caixa de seleção, número do item e nome lado a lado (sem necessidade de rolar horizontalmente para encontrar a caixa). A tabela de conferência detalhada fica abaixo. Apenas itens marcados serão gravados.
+- Na área **Pregões**, aba **Excluir item importado**, exclusão mediante confirmação. Itens já vinculados a PPLAN, requisições ou empenhos ficam protegidos.
+- Em **Requisições SIPAC**, selecionar um fornecedor e adicionar vários itens dele na mesma requisição, com quantidade individual; uma requisição não pode misturar fornecedores. Uma requisição existente pode receber novos itens do mesmo fornecedor, desde que não sejam repetidos.
+
+**Atualização**: substitua `app.py`, `importador.py`, `requirements.txt` e `README.md` no diretório que o Streamlit utiliza. Os dados locais SQLite existentes não são apagados por esta atualização do código. O aplicativo de demonstração ainda requer banco persistente e autenticação antes do uso administrativo em produção.

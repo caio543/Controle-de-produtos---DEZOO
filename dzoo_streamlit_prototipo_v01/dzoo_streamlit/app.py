@@ -279,7 +279,7 @@ def salvar_itens_selecionados(df):
 def licitacoes():
     st.title("📑 Pregões e itens de interesse do DEZOO")
     st.caption("Organização prioritária por pregão. Apenas itens escolhidos na importação são cadastrados.")
-    tabs=st.tabs(["Catálogo por pregão","Importar e selecionar itens","Cadastrar pregão/ata manualmente","Cadastrar item manualmente"])
+    tabs=st.tabs(["Catálogo por pregão","Importar e selecionar itens","Cadastrar pregão/ata manualmente","Cadastrar item manualmente","Excluir item importado"])
     with tabs[0]:
         df=view_atas()
         if df.empty: st.info("Nenhum item cadastrado. Importe PDFs ou cadastre itens manualmente.")
@@ -318,6 +318,8 @@ def licitacoes():
                 with st.spinner("Analisando tabelas dos documentos..."):
                     preview,alerts=criar_previa(st.session_state["importacao_arquivos"])
                 st.session_state["importacao_previa"]=preview
+                for k in ["importacao_selecao","grade_selecao_importacao","editor_detalhes_importacao"]:
+                    st.session_state.pop(k,None)
                 st.session_state["importacao_alertas"]=alerts
         if "importacao_previa" in st.session_state:
             st.markdown("**2. Conferir os dados e marcar os itens de interesse**")
@@ -326,14 +328,47 @@ def licitacoes():
             if original.empty: st.error("Nenhum item foi extraído com segurança. Tente PDFs com texto selecionável ou cadastre os itens manualmente.")
             else:
                 st.info(f"{len(original)} itens encontrados. Nenhum será salvo sem sua confirmação.")
-                editor=st.data_editor(original,use_container_width=True,hide_index=True,num_rows="fixed",key="editor_itens_importados",column_config={"Selecionar":st.column_config.CheckboxColumn("Importar para DEZOO",default=False),"Quantidade":st.column_config.NumberColumn(min_value=0),"Preço unitário":st.column_config.NumberColumn(min_value=0)})
+                # Grade compacta: checkboxes e nomes sempre visíveis, sem rolagem horizontal.
+                if "importacao_selecao" not in st.session_state or len(st.session_state["importacao_selecao"])!=len(original):
+                    st.session_state["importacao_selecao"]=[False]*len(original)
+                a,b=st.columns(2)
+                with a:
+                    if st.button("☑ Selecionar todos",key="marcar_importacao"):
+                        st.session_state["importacao_selecao"]=[True]*len(original)
+                        st.session_state.pop("grade_selecao_importacao",None)
+                        st.rerun()
+                with b:
+                    if st.button("☐ Desmarcar todos",key="desmarcar_importacao"):
+                        st.session_state["importacao_selecao"]=[False]*len(original)
+                        st.session_state.pop("grade_selecao_importacao",None)
+                        st.rerun()
+                st.markdown("**Seleção de itens (checkbox e nome na mesma tabela)**")
+                pequeno=pd.DataFrame({
+                    "Selecionar":st.session_state["importacao_selecao"],
+                    "Item":original["Item"].astype(str).tolist(),
+                    "Produto / especificação":original["Produto / especificação"].astype(str).tolist()
+                })
+                escolha=st.data_editor(pequeno,hide_index=True,use_container_width=True,height=340,
+                    disabled=["Item","Produto / especificação"],key="grade_selecao_importacao",
+                    column_config={"Selecionar":st.column_config.CheckboxColumn("Selecionar",width="small"),
+                                   "Item":st.column_config.TextColumn("Item",width="small"),
+                                   "Produto / especificação":st.column_config.TextColumn("Produto",width="large")})
+                st.session_state["importacao_selecao"]=escolha["Selecionar"].fillna(False).astype(bool).tolist()
+                st.markdown("**Conferência e edição de todos os campos**")
+                campos=original.drop(columns=["Selecionar"],errors="ignore")
+                detalhes=st.data_editor(campos,use_container_width=True,hide_index=True,height=360,
+                    key="editor_detalhes_importacao",column_config={"Quantidade":st.column_config.NumberColumn(min_value=0),
+                     "Preço unitário":st.column_config.NumberColumn(min_value=0)})
+                editor=detalhes.copy()
+                editor.insert(0,"Selecionar",st.session_state["importacao_selecao"])
                 chosen=editor[editor["Selecionar"]==True]
                 st.metric("Itens marcados para cadastro",len(chosen))
                 if st.button("Confirmar e salvar somente selecionados",type="primary",disabled=chosen.empty):
                     try:
                         n,duplicados=salvar_itens_selecionados(editor)
                         st.success(f"{n} itens cadastrados; {duplicados} já existiam e foram ignorados.")
-                        del st.session_state["importacao_previa"]
+                        for k in ["importacao_previa","importacao_selecao","grade_selecao_importacao","editor_detalhes_importacao"]:
+                            st.session_state.pop(k,None)
                         st.rerun()
                     except (ValueError,sqlite3.Error) as exc: st.error(str(exc))
                 st.caption("A descrição/quantidade extraída de PDFs pode conter erros: confirme cada linha. Itens não marcados não são gravados.")
@@ -366,6 +401,34 @@ def licitacoes():
                     execute("INSERT INTO ata_itens(ata_id,produto_id,item_num,quantidade,preco,unidade) VALUES(?,?,?,?,?,?)",(aid,pid,n.strip(),qtd,preco,unidade.strip()))
                     st.success("Item cadastrado.")
                 except sqlite3.IntegrityError:st.error("Item já cadastrado nesta ata.")
+
+    with tabs[4]:
+        st.warning("A exclusão será bloqueada quando o item estiver vinculado a solicitações, requisições ou empenhos. Isso preserva o histórico administrativo.")
+        existentes=sql("""SELECT ai.id,a.pregao,a.numero AS ata,ai.item_num,p.nome AS produto,a.fornecedor
+                           FROM ata_itens ai JOIN atas a ON a.id=ai.ata_id
+                           JOIN produtos p ON p.id=ai.produto_id ORDER BY a.pregao,ai.item_num""")
+        if existentes.empty:
+            st.info("Não há itens cadastrados.")
+        else:
+            iid=pick("Item para excluir",existentes,lambda r:f"{r['pregao']} · Item {r['item_num']} · {r['produto']} · {r['fornecedor']}")
+            if iid:
+                links={tab:one(f"SELECT COUNT(*) AS n FROM {tab} WHERE ata_item_id=?",(iid,))["n"]
+                       for tab in ("pplan_itens","req_itens","empenho_itens")}
+                bloqueado=any(links.values())
+                if bloqueado:
+                    st.error("Exclusão bloqueada: o item já tem vínculos administrativos. "
+                             "Solicitações PPLAN: {pplan_itens}; requisições: {req_itens}; empenhos: {empenho_itens}.".format(**links))
+                else:
+                    confirmar=st.checkbox("Confirmo a exclusão definitiva deste item sem movimentações",key=f"excluir_conf_{iid}")
+                    if st.button("Excluir item",disabled=not confirmar,type="primary"):
+                        registro=one("SELECT produto_id,ata_id FROM ata_itens WHERE id=?",(iid,))
+                        with conn() as c:
+                            c.execute("DELETE FROM ata_itens WHERE id=?",(iid,))
+                            c.execute("DELETE FROM produtos WHERE id=? AND NOT EXISTS (SELECT 1 FROM ata_itens WHERE produto_id=?) AND NOT EXISTS (SELECT 1 FROM demandas WHERE produto_id=?)",
+                                      (registro["produto_id"],registro["produto_id"],registro["produto_id"]))
+                            c.commit()
+                        st.success("Item excluído do catálogo.")
+                        st.rerun()
 
 
 def pplan():
@@ -432,21 +495,58 @@ def compras():
     items=view_atas()
     reqs=sql("SELECT * FROM requisicoes ORDER BY id DESC")
     with tab1:
-        st.caption("A requisição SIPAC pode ser cadastrada por item. O vínculo PPLAN é opcional para migrar registros antigos.")
-        with st.form("requisicao_form"):
-            num=st.text_input("Número/ano da requisição *"); dt=st.date_input("Data",key="req_dt")
-            iid=pick("Item da ata",items,lambda r:f"{r['produto']} · {r['ata']} item {r['item_num']}")
-            q=st.number_input("Quantidade requisitada",min_value=0.0)
-            pi_df=sql("SELECT pi.id,pp.numero,p.nome AS produto FROM pplan_itens pi JOIN pplans pp ON pp.id=pi.pplan_id JOIN ata_itens ai ON ai.id=pi.ata_item_id JOIN produtos p ON p.id=ai.produto_id ORDER BY pi.id DESC")
-            p_opts={"Sem vínculo (histórico)":None,**options(pi_df,lambda r:f"{r['numero']} · {r['produto']}")}
-            p_sel=st.selectbox("Solicitação PPLAN vinculada",list(p_opts))
-            if st.form_submit_button("Registrar requisição e item"):
-                if not num.strip() or q<=0 or iid is None: st.error("Preencha número, item e quantidade.")
-                else:
-                    rid=execute("INSERT OR IGNORE INTO requisicoes (numero,data) VALUES (?,?)",(num.strip(),dt.isoformat()))
-                    if rid==0: rid=one("SELECT id FROM requisicoes WHERE numero=?",(num.strip(),))["id"]
-                    execute("INSERT INTO req_itens (requisicao_id,ata_item_id,pplan_item_id,quantidade) VALUES (?,?,?,?)",(rid,iid,p_opts[p_sel],q))
-                    st.success("Item da requisição registrado.")
+        st.caption("Cada requisição pertence a um fornecedor e pode reunir diversos itens deste mesmo fornecedor.")
+        if items.empty:
+            st.info("Cadastre itens de pregão antes de registrar requisições.")
+        else:
+            fornecedores=sorted(items["fornecedor"].dropna().unique().tolist())
+            fornecedor=st.selectbox("Fornecedor da requisição",fornecedores,key="req_fornecedor")
+            disponiveis=items[items["fornecedor"]==fornecedor].copy()
+            st.markdown("**Selecione os itens do fornecedor e informe as quantidades**")
+            grade=pd.DataFrame({"Adicionar":[False]*len(disponiveis),
+                                "Item da ata":disponiveis["item_num"].astype(str).tolist(),
+                                "Produto":disponiveis["produto"].astype(str).tolist(),
+                                "Ata":disponiveis["ata"].astype(str).tolist(),
+                                "Quantidade":[0.0]*len(disponiveis),
+                                "Unidade":disponiveis["unidade"].astype(str).tolist()})
+            editado=st.data_editor(grade,key=f"req_grade_{fornecedor}",hide_index=True,use_container_width=True,
+                disabled=["Item da ata","Produto","Ata","Unidade"],
+                column_config={"Adicionar":st.column_config.CheckboxColumn(width="small"),
+                               "Quantidade":st.column_config.NumberColumn(min_value=0.0,step=1.0)})
+            with st.form("requisicao_multiplos_itens"):
+                numero=st.text_input("Número/ano da requisição *")
+                dt=st.date_input("Data da requisição",key="req_dt")
+                obs=st.text_area("Observações",height=80)
+                if st.form_submit_button("Salvar requisição com os itens selecionados",type="primary"):
+                    marcados=editado[editado["Adicionar"]==True]
+                    if not numero.strip() or marcados.empty or (marcados["Quantidade"]<=0).any():
+                        st.error("Informe o número, selecione os itens e preencha quantidades positivas.")
+                    else:
+                        try:
+                            with conn() as c:
+                                antiga=c.execute("SELECT id FROM requisicoes WHERE numero=?",(numero.strip(),)).fetchone()
+                                if antiga:
+                                    rid=antiga["id"]
+                                    fornecedores_antigos=c.execute("""SELECT DISTINCT a.fornecedor FROM req_itens ri
+                                        JOIN ata_itens ai ON ai.id=ri.ata_item_id JOIN atas a ON a.id=ai.ata_id
+                                        WHERE ri.requisicao_id=?""",(rid,)).fetchall()
+                                    if any(x["fornecedor"]!=fornecedor for x in fornecedores_antigos):
+                                        raise ValueError("Esta requisição já possui itens de outro fornecedor.")
+                                else:
+                                    rid=c.execute("INSERT INTO requisicoes(numero,data,observacoes) VALUES(?,?,?)",
+                                                  (numero.strip(),dt.isoformat(),obs)).lastrowid
+                                for idx,r in marcados.iterrows():
+                                    aid=int(disponiveis.iloc[int(idx)]["id"])
+                                    anterior=c.execute("SELECT id FROM req_itens WHERE requisicao_id=? AND ata_item_id=?",(rid,aid)).fetchone()
+                                    if anterior:
+                                        raise ValueError(f"Item {r['Item da ata']} já consta nesta requisição.")
+                                    c.execute("INSERT INTO req_itens(requisicao_id,ata_item_id,quantidade) VALUES(?,?,?)",
+                                              (rid,aid,float(r["Quantidade"])))
+                                c.commit()
+                            st.success(f"Requisição {numero.strip()} registrada com {len(marcados)} itens de {fornecedor}.")
+                            st.rerun()
+                        except (sqlite3.Error,ValueError) as exc:
+                            st.error(str(exc))
     with tab2:
         with st.form("emp_novo"):
             num=st.text_input("Número/ano do empenho *")
