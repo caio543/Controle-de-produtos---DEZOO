@@ -1,28 +1,39 @@
-# DZOO · Gestão de Aquisições (protótipo v0.1)
+# DZOO · Gestão de Aquisições (protótipo v0.2)
 
-Protótipo operacional do Departamento de Zootecnia da UFSJ, com navegação por produto e por processo, planejamento, atas, PPLAN, requisições, empenhos, recebimentos, DANFEs, relatórios e geração de rascunhos.
+Aplicativo Streamlit experimental para gestão das aquisições do Departamento de Zootecnia da UFSJ.
 
-## Instalação local
+## Novidades da versão 0.2
 
-```bash
-python -m venv .venv
-# Windows PowerShell:
-.venv\Scripts\Activate.ps1
+- Consulta prioritária por **pregão**, preservando os vínculos de cada item com a respectiva ata e fornecedor.
+- Importação assistida de **vários PDFs anexados**, **arquivo PDF por link público** ou **pasta pública do Google Drive** (via biblioteca `gdown`).
+- Extração preliminar de metadados e tabelas com PyMuPDF. A qualidade depende do formato do PDF; arquivos digitalizados ou tabelas não estruturadas podem requerer cadastro manual.
+- Prévia editável dos itens encontrados, com checkbox **Importar para DEZOO**.
+- **Somente itens explicitamente selecionados** são persistidos; duplicidades por ata + número do item são ignoradas.
+- Mantidos os módulos de planejamento, PPLAN, requisições, empenhos, recebimentos por DANFE e relatórios da versão 0.1.
+
+## Executar localmente
+
+```powershell
 pip install -r requirements.txt
-streamlit run app.py
+python -m streamlit run app.py
 ```
 
-## Publicação
+Na área **Pregões e itens de interesse do DEZOO**, use a aba **Importar e selecionar itens**. Escolha PDFs ou link Drive público, clique em **Ler PDFs** ou **Buscar PDFs do Drive**, depois em **Extrair itens e preparar conferência**. Revise cada linha, marque apenas os itens desejados e confirme o cadastro.
 
-1. Envie `app.py`, `requirements.txt` e `.gitignore` a um repositório no GitHub.
-2. Crie um aplicativo em https://share.streamlit.io e selecione `app.py`.
-3. **Atenção:** SQLite é utilizado apenas para testes locais. Na Streamlit Community Cloud, os arquivos locais não são persistência segura; cadastros podem desaparecer após reinicialização. Não utilize dados administrativos reais na implantação pública antes de integrar banco persistente, autenticação e controle de acesso.
+## Publicar no GitHub / Streamlit
 
-## Avisos importantes
+1. **Não envie o ZIP inteiro como arquivo**: descompacte-o.
+2. Envie os arquivos `app.py`, `importador.py`, `requirements.txt`, `.gitignore` e `README.md` **para a mesma pasta do repositório**.
+3. Se mantiver a estrutura antiga do GitHub, substitua o `app.py` e demais arquivos dentro de `dzoo_streamlit_prototipo_v01/dzoo_streamlit/`. O campo `Main file path` continua `dzoo_streamlit_prototipo_v01/dzoo_streamlit/app.py`.
+4. Para novo repositório com arquivos na raiz, o campo `Main file path` será `app.py`.
+5. O Streamlit normalmente atualiza automaticamente o aplicativo após o commit no GitHub.
 
-- Banco começa vazio. Na barra lateral há opção **Popular dados fictícios** para experimentar. Esses dados são identificados como exemplos e podem ser apagados com **Limpar dados de demonstração**.
-- Não existe integração real com SIPAC, Compras.gov.br, PNCP ou e-mail; o aplicativo gera rascunhos e permite registro manual.
-- Valores e saldos refletem **somente aquisições registradas no aplicativo**. Não são saldos oficiais do SIPAC.
-- Registrar notas fiscais não significa que elas foram atestadas ou pagas.
-- No protótipo, cada DANFE pertence a uma entrega; vários DANFEs da mesma entrega podem conter o mesmo produto. As quantidades por DANFE são somadas exatamente uma vez.
-- Não há autenticação nesta versão: use somente em ambiente local, com dados de teste.
+## Limitações e segurança
+
+- **Protótipo para avaliação com dados fictícios**: SQLite local não oferece persistência segura no Streamlit Community Cloud e o aplicativo ainda não possui autenticação. Não insira informações administrativas sensíveis em um app público.
+- Links públicos podem ser bloqueados por limitação do Google ou por alteração do compartilhamento. Nesse caso, use upload de PDF.
+- Os dados extraídos de PDF **não são necessariamente fiéis**: conferir item, quantidade, unidade, fornecedor e preço antes de salvar. Não considera digitalização sem camada de texto (OCR não implementado).
+- A data de vigência das atas **não é inferida automaticamente** e deve ser confirmada nos documentos oficiais antes de utilizar o saldo para novas compras.
+- As movimentações cadastradas no app **não são consulta oficial ao SIPAC**; o saldo de ata é apenas cálculo interno.
+- Não existe integração real com SIPAC, Compras.gov, PNCP nem envio de e-mail.
+- O botão de carga fictícia só funciona se o banco estiver vazio.

@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 from docx import Document
+from importador import baixar_drive_publico, criar_previa
 
 st.set_page_config(page_title="DZOO | Gestão de Aquisições", page_icon="📦", layout="wide")
 DB = Path(__file__).with_name("dzoo_demo.db")
@@ -146,7 +147,7 @@ def pendencias():
 
 def home():
     st.title("📦 DZOO | Gestão de Aquisições")
-    st.caption("Protótipo v0.1 · Registro local de testes · Informações não integradas ao SIPAC")
+    st.caption("Protótipo v0.2 · Registro local de testes · Informações não integradas ao SIPAC")
     p=pendencias(); a=view_atas()
     n_notas=one("SELECT COUNT(*) AS n FROM notas WHERE enviado=0")["n"]
     x,y,z,w=st.columns(4)
@@ -237,45 +238,134 @@ def planejamento():
         table(sql("SELECT r.numero AS requisicao, p.nome AS produto, SUM(ri.quantidade) AS quantidade_sipac,ai.unidade FROM req_itens ri JOIN requisicoes r ON r.id=ri.requisicao_id JOIN ata_itens ai ON ai.id=ri.ata_item_id JOIN produtos p ON p.id=ai.produto_id GROUP BY r.numero,p.nome,ai.unidade"))
 
 
+def salvar_itens_selecionados(df):
+    """Persiste apenas itens marcados, em transação atômica e sem duplicidade."""
+    selected=df[df["Selecionar"] == True].copy()
+    if selected.empty:
+        raise ValueError("Selecione ao menos um item na prévia.")
+    if selected[["Pregão","Ata","Fornecedor","Item","Produto / especificação","Unidade"]].isna().any().any():
+        raise ValueError("Há campos vazios nos itens selecionados.")
+    count=0; duplicates=0
+    with conn() as c:
+        for _,r in selected.iterrows():
+            pregao=str(r["Pregão"]).strip(); ata=str(r["Ata"]).strip()
+            fornecedor=str(r["Fornecedor"]).strip(); num=str(r["Item"]).strip()
+            nome=str(r["Produto / especificação"]).strip();unidade=str(r["Unidade"]).strip()
+            qtd=float(r["Quantidade"]);preco=float(r["Preço unitário"])
+            if not all([pregao,ata,fornecedor,num,nome,unidade]) or qtd<=0 or preco<0:
+                raise ValueError("Revise pregão, ata, fornecedor, item, descrição, quantidade e preço dos selecionados.")
+            exists=c.execute("SELECT id FROM atas WHERE numero=?",(ata,)).fetchone()
+            if exists:
+                aid=exists["id"]
+                prev=c.execute("SELECT pregao FROM atas WHERE id=?",(aid,)).fetchone()
+                if prev["pregao"] and prev["pregao"]!=pregao:
+                    raise ValueError(f"Ata {ata} já pertence a outro pregão: {prev['pregao']}.")
+            else:
+                cur=c.execute("INSERT INTO atas(numero,pregao,fornecedor,email,telefone,url) VALUES(?,?,?,?,?,?)",(ata,pregao,fornecedor,str(r.get("E-mail", "")),str(r.get("Telefone", "")),str(r["Documento"])))
+                aid=cur.lastrowid
+            if c.execute("SELECT id FROM ata_itens WHERE ata_id=? AND item_num=?",(aid,num)).fetchone():
+                duplicates+=1;continue
+            # Igualdade exata de descrição e unidade; sem associação automática por semelhança textual.
+            p=c.execute("SELECT id FROM produtos WHERE nome=? AND unidade=?",(nome,unidade)).fetchone()
+            if p: pid=p["id"]
+            else:
+                pid=c.execute("INSERT INTO produtos(nome,unidade,especificacao) VALUES(?,?,?)",(nome,unidade,nome)).lastrowid
+            c.execute("INSERT INTO ata_itens(ata_id,produto_id,item_num,quantidade,preco,unidade) VALUES(?,?,?,?,?,?)",(aid,pid,num,qtd,preco,unidade))
+            count+=1
+        c.commit()
+    return count,duplicates
+
+
 def licitacoes():
-    st.title("Licitações e atas de interesse do DEZOO")
-    st.caption("O protótipo cadastra apenas itens selecionados de interesse do DEZOO; importação automática de PDFs ainda não implementada.")
-    a,b,c=st.tabs(["Consultar atas e itens","Cadastrar ata","Cadastrar item da ata"])
-    with a:
-        table(sql("SELECT id,numero,pregao,fornecedor,email,telefone,inicio,fim,url FROM atas WHERE interesse=1 ORDER BY numero"))
+    st.title("📑 Pregões e itens de interesse do DEZOO")
+    st.caption("Organização prioritária por pregão. Apenas itens escolhidos na importação são cadastrados.")
+    tabs=st.tabs(["Catálogo por pregão","Importar e selecionar itens","Cadastrar pregão/ata manualmente","Cadastrar item manualmente"])
+    with tabs[0]:
         df=view_atas()
-        if not df.empty:
-            df["saldo_calculado"]=df.quantidade-df.empenhado
-            table(df[["produto","codigo_sipac","ata","item_num","fornecedor","quantidade","empenhado","saldo_calculado","requisitado_sem_empenho","unidade","preco","fim"]])
-    with b:
+        if df.empty: st.info("Nenhum item cadastrado. Importe PDFs ou cadastre itens manualmente.")
+        else:
+            atas=sql("SELECT id,numero,pregao FROM atas")
+            df=df.merge(atas[["id","pregao"]],left_on="ata_id",right_on="id",suffixes=("","_ata"))
+            pregoes=sorted(df.pregao.fillna("Não identificado").unique().tolist())
+            chosen=st.selectbox("Pregão",pregoes)
+            df=df[df.pregao.fillna("Não identificado")==chosen].copy()
+            query=st.text_input("Pesquisar produto, item ou fornecedor",key="consulta_pregao")
+            if query:
+                mask=df[["produto","item_num","fornecedor"]].astype(str).apply(lambda c:c.str.contains(query,case=False,regex=False)).any(axis=1)
+                df=df[mask]
+            if not df.empty:
+                df["saldo_calculado"]=df.quantidade-df.empenhado
+                table(df[["item_num","produto","fornecedor","ata","quantidade","unidade","preco","empenhado","saldo_calculado","requisitado_sem_empenho"]].rename(columns={"item_num":"Item","produto":"Produto","ata":"Ata de origem"}))
+                download_xlsx(df,"dzoo_itens_pregao.xlsx")
+            st.caption("Saldo estimado apenas com empenhos registrados neste aplicativo; não é saldo oficial SIPAC.")
+    with tabs[1]:
+        st.markdown("**1. Obter arquivos PDF**")
+        mode=st.radio("Fonte",["Anexar PDFs","Link público Google Drive"],horizontal=True)
+        if mode=="Anexar PDFs":
+            files=st.file_uploader("Selecione um ou vários PDFs",type="pdf",accept_multiple_files=True)
+            if st.button("Ler PDFs",disabled=not files):
+                st.session_state["importacao_arquivos"]=[(f.name,f.getvalue()) for f in files]
+        else:
+            url=st.text_input("Link público de pasta ou arquivo",placeholder="https://drive.google.com/drive/folders/...")
+            if st.button("Buscar PDFs do Drive",disabled=not url.strip()):
+                try:
+                    with st.spinner("Baixando PDFs públicos..."):
+                        st.session_state["importacao_arquivos"]=baixar_drive_publico(url.strip())
+                    st.success(f"Encontrados {len(st.session_state['importacao_arquivos'])} PDFs.")
+                except Exception as exc: st.error(f"Não foi possível obter os arquivos: {exc}")
+        if st.session_state.get("importacao_arquivos"):
+            if st.button("Extrair itens e preparar conferência"):
+                with st.spinner("Analisando tabelas dos documentos..."):
+                    preview,alerts=criar_previa(st.session_state["importacao_arquivos"])
+                st.session_state["importacao_previa"]=preview
+                st.session_state["importacao_alertas"]=alerts
+        if "importacao_previa" in st.session_state:
+            st.markdown("**2. Conferir os dados e marcar os itens de interesse**")
+            for warning in st.session_state.get("importacao_alertas",[]): st.warning(warning)
+            original=st.session_state["importacao_previa"]
+            if original.empty: st.error("Nenhum item foi extraído com segurança. Tente PDFs com texto selecionável ou cadastre os itens manualmente.")
+            else:
+                st.info(f"{len(original)} itens encontrados. Nenhum será salvo sem sua confirmação.")
+                editor=st.data_editor(original,use_container_width=True,hide_index=True,num_rows="fixed",key="editor_itens_importados",column_config={"Selecionar":st.column_config.CheckboxColumn("Importar para DEZOO",default=False),"Quantidade":st.column_config.NumberColumn(min_value=0),"Preço unitário":st.column_config.NumberColumn(min_value=0)})
+                chosen=editor[editor["Selecionar"]==True]
+                st.metric("Itens marcados para cadastro",len(chosen))
+                if st.button("Confirmar e salvar somente selecionados",type="primary",disabled=chosen.empty):
+                    try:
+                        n,duplicados=salvar_itens_selecionados(editor)
+                        st.success(f"{n} itens cadastrados; {duplicados} já existiam e foram ignorados.")
+                        del st.session_state["importacao_previa"]
+                        st.rerun()
+                    except (ValueError,sqlite3.Error) as exc: st.error(str(exc))
+                st.caption("A descrição/quantidade extraída de PDFs pode conter erros: confirme cada linha. Itens não marcados não são gravados.")
+    with tabs[2]:
         with st.form("nova_ata"):
+            pregao=st.text_input("Pregão (ex.: 35/2026) *")
             num=st.text_input("Número/ano da ata *")
-            pregao=st.text_input("Pregão")
-            fornecedor=st.text_input("Razão social do fornecedor *")
-            email=st.text_input("E-mail"); telefone=st.text_input("Telefone")
+            fornecedor=st.text_input("Fornecedor *")
+            email=st.text_input("E-mail");telefone=st.text_input("Telefone")
             dt1=st.date_input("Início da vigência",value=date.today())
             dt2=st.date_input("Fim da vigência",value=date.today())
-            url=st.text_input("URL do documento original")
-            if st.form_submit_button("Cadastrar ata"):
+            url=st.text_input("Link do documento")
+            if st.form_submit_button("Cadastrar"):
                 try:
-                    if not num.strip() or not fornecedor.strip() or dt2<dt1: raise ValueError("Confira número, fornecedor e datas.")
-                    execute("INSERT INTO atas (numero,pregao,fornecedor,email,telefone,inicio,fim,url) VALUES (?,?,?,?,?,?,?,?)",(num.strip(),pregao,fornecedor.strip(),email,telefone,dt1.isoformat(),dt2.isoformat(),url))
-                    st.success("Ata cadastrada.")
-                except (sqlite3.IntegrityError,ValueError) as e: st.error(f"Não foi possível cadastrar: {e}")
-    with c:
-        atas=sql("SELECT * FROM atas WHERE interesse=1 ORDER BY numero"); ps=sql("SELECT * FROM produtos ORDER BY nome")
+                    if not pregao.strip() or not num.strip() or not fornecedor.strip() or dt2<dt1: raise ValueError("Confira os campos obrigatórios e datas.")
+                    execute("INSERT INTO atas(numero,pregao,fornecedor,email,telefone,inicio,fim,url) VALUES(?,?,?,?,?,?,?,?)",(num.strip(),pregao.strip(),fornecedor.strip(),email,telefone,dt1.isoformat(),dt2.isoformat(),url))
+                    st.success("Cadastro realizado.")
+                except (ValueError,sqlite3.Error) as exc:st.error(str(exc))
+    with tabs[3]:
+        atas=sql("SELECT * FROM atas ORDER BY pregao,numero");ps=sql("SELECT * FROM produtos ORDER BY nome")
         with st.form("novo_item_ata"):
-            aid=pick("Ata",atas,lambda r:r["numero"])
-            pid=pick("Produto de interesse",ps,lambda r:r["nome"])
-            n=st.text_input("Número do item *")
+            aid=pick("Ata (vinculada ao pregão)",atas,lambda r:f"{r['pregao']} · Ata {r['numero']}")
+            pid=pick("Produto DEZOO",ps,lambda r:r["nome"])
+            n=st.text_input("Número do item")
             qtd=st.number_input("Quantidade registrada",min_value=0.0)
             preco=st.number_input("Preço unitário R$",min_value=0.0,format="%.4f")
-            unidade=st.text_input("Unidade do item *",value="kg")
-            if st.form_submit_button("Adicionar item à ata") and aid and pid:
+            unidade=st.text_input("Unidade do item",value="kg")
+            if st.form_submit_button("Adicionar item") and aid and pid:
                 try:
-                    execute("INSERT INTO ata_itens (ata_id,produto_id,item_num,quantidade,preco,unidade) VALUES (?,?,?,?,?,?)",(aid,pid,n.strip(),qtd,preco,unidade.strip()))
+                    execute("INSERT INTO ata_itens(ata_id,produto_id,item_num,quantidade,preco,unidade) VALUES(?,?,?,?,?,?)",(aid,pid,n.strip(),qtd,preco,unidade.strip()))
                     st.success("Item cadastrado.")
-                except sqlite3.IntegrityError: st.error("Item já cadastrado nesta ata.")
+                except sqlite3.IntegrityError:st.error("Item já cadastrado nesta ata.")
 
 
 def pplan():
